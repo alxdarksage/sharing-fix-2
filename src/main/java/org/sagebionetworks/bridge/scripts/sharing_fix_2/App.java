@@ -10,13 +10,25 @@ import static org.sagebionetworks.bridge.rest.model.SharingScope.SPONSORS_AND_PA
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 
+import com.amazonaws.ClientConfiguration;
+import com.amazonaws.PredefinedClientConfigurations;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient;
+import com.amazonaws.services.dynamodbv2.document.DynamoDB;
+import com.amazonaws.services.dynamodbv2.document.Table;
+import com.amazonaws.services.dynamodbv2.document.spec.UpdateItemSpec;
+import com.amazonaws.services.dynamodbv2.document.utils.ValueMap;
+import com.amazonaws.services.dynamodbv2.model.AttributeValue;
+import com.amazonaws.services.dynamodbv2.model.GetItemRequest;
+import com.amazonaws.services.dynamodbv2.model.GetItemResult;
+import com.amazonaws.services.dynamodbv2.model.ReturnValue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Joiner;
+import com.google.common.collect.ImmutableMap;
 
 import org.joda.time.DateTime;
 
@@ -32,12 +44,14 @@ import org.sagebionetworks.bridge.rest.model.UploadList;
 
 public class App {
     private static final ObjectMapper MAPPER = new ObjectMapper();
-
+    private static final String TABLE_NAME = "prod-heroku-HealthDataRecord3";
+    
     private List<UserInfo> users;
     private SignIn signIn;
     // 2019-08-29T14:45:05-07:00 is the timestamp of the broken deployment
     private DateTime eventStart = new DateTime(1567115105000L);
     // 2019-09-19T23:24:02.000Z is the timestamp of the deployment of a fix (in query for users below)
+    private BasicAWSCredentials awsCredentials;
 
     public static void main(String[] args) throws Exception {
         // These users are the people retrieved with this query:
@@ -49,7 +63,7 @@ public class App {
         // AND modifiedOn < 1568935442000
         // AND (SELECT count(*) FROM AccountDataGroups ag WHERE ag.accountId = a.id AND ag.dataGroup = 'test_user') = 0
         // LIMIT 2350;
-        JsonNode users = MAPPER.readTree(new File("/Users/adark/temp/impacted-users-short.json"));
+        JsonNode users = MAPPER.readTree(new File("/Users/adark/temp/impacted-users.json"));
         List<UserInfo> list = new ArrayList<>();
         for (int i = 0; i < users.size(); i++) {
             JsonNode user = users.get(i);
@@ -63,15 +77,22 @@ public class App {
                 .study("api")
                 .email(config.get("admin").get("email").textValue())
                 .password(config.get("admin").get("password").textValue());
-        new App(list, signIn).run();
+        
+        BasicAWSCredentials awsCredentials = new BasicAWSCredentials(
+                config.get("aws").get("key").textValue(),
+                config.get("aws").get("secret").textValue());
+        new App(list, signIn, awsCredentials).run();
     }
 
-    public App(List<UserInfo> users, SignIn signIn) {
+    public App(List<UserInfo> users, SignIn signIn, BasicAWSCredentials awsCredentials) {
         this.users = users;
         this.signIn = signIn;
+        this.awsCredentials = awsCredentials;
     }
     
     public void run() throws Exception {
+        AmazonDynamoDBClient client = getDynamoClient();
+        Table table = new DynamoDB(client).getTable(TABLE_NAME);
         ClientManager manager = createClientManager();
         ForAdminsApi adminsApi = manager.getClient(ForAdminsApi.class);
 
@@ -102,17 +123,35 @@ public class App {
                 }
             }
             if (scope != SharingScope.NO_SHARING) {
-                System.out.println("Repair user " + userInfo.getId() + " in study " + userInfo.getStudyId() + " to scope " + scope + " at " + DateTime.now().plusMinutes(5));
                 participant.setSharingScope(scope);
+                System.out.println("UPDATE USER: " + userInfo.getId() + " to sharing " + scope);
                 usersApi.updateParticipant(userInfo.getId(), participant).execute().body();
                 
-                
-                
-            } else {
-                System.out.println("Skip user " + userInfo.getId());
+                List<String> recordIds = recordsToChange(usersApi, userInfo.getId());
+                System.out.println("UPDATE HEALTH RECORDS: " + Joiner.on(", ").join(recordIds));
+                for (String recordId : recordIds) {
+                    GetItemRequest request = new GetItemRequest();
+                    request.setTableName(TABLE_NAME);
+                    request.setKey(ImmutableMap.of("id", new AttributeValue().withS(recordId)));
+                    GetItemResult result = client.getItem(request);
+                    
+                    if (result.getItem().get("userSharingScope").getS().equals("NO_SHARING")) {
+                        UpdateItemSpec updateItemSpec = new UpdateItemSpec().withPrimaryKey("id", recordId)
+                                .withUpdateExpression("set userSharingScope = :r")
+                                .withValueMap(new ValueMap().withString(":r", scope.name()))
+                                .withReturnValues(ReturnValue.UPDATED_NEW);
+                        table.updateItem(updateItemSpec);
+                    }
+                }
             }
             Thread.sleep(1000);
         }
+    }
+    
+    @SuppressWarnings("deprecation")
+    AmazonDynamoDBClient getDynamoClient() {
+        ClientConfiguration awsClientConfig = PredefinedClientConfigurations.dynamoDefault().withMaxErrorRetry(1);
+        return new AmazonDynamoDBClient(awsCredentials, awsClientConfig);
     }
     
     ClientManager createClientManager() {
@@ -125,23 +164,38 @@ public class App {
         if (currentStudyId.equals(userInfo.getStudyId())) {
             return currentStudyId;
         }
-        System.out.println("Changing to study " + userInfo.getStudyId());
         adminsApi.adminChangeStudy(new SignIn().study(userInfo.getStudyId())).execute().body();
         return userInfo.getStudyId();
     }
     
+    List<String> recordsToChange(ParticipantsApi usersApi, String userId) throws Exception {
+        DateTime start = new DateTime(eventStart);
+        DateTime end = DateTime.now();
+        List<String> healthRecordIds = new ArrayList<>();
+        String offsetKey = null;
+        do {
+            UploadList list = usersApi.getParticipantUploads(userId, start, end, 50, offsetKey).execute().body();
+            for (Upload upload : list.getItems()) {
+                if (upload.getRecordId() != null) {
+                    healthRecordIds.add(upload.getRecordId());
+                }
+            }
+            offsetKey = list.getNextPageOffsetKey();
+        } while(offsetKey != null);
+        
+        return healthRecordIds;
+    }
+    
+    
     SharingScope findPriorSharingScope(ForAdminsApi adminsApi, ParticipantsApi usersApi, String userId, DateTime createdOn) throws Exception {
         // We have to be super aggressive about this. The user was created before the sharing error, we need to figure
         // out what their sharing setting was...
-        System.out.println("Finding prior sharing scope...");
-        
         int daysStart = 0;
         int daysEnd = 0;
         while(eventStart.minusDays(daysStart).isAfter(createdOn)) {
             daysEnd = daysStart;
             daysStart += 45;
             if (eventStart.minusDays(daysStart).isBefore(createdOn)) {
-                System.out.println("No upload could be found with a sharing scope");
                 return null;
             }
             String offsetKey = null;
@@ -164,13 +218,11 @@ public class App {
                     Upload fullUpload = adminsApi.getUploadByRecordId(upload.getRecordId()).execute().body();
                     if (fullUpload.getHealthData().getUserSharingScope() != null) {
                         SharingScope found = fullUpload.getHealthData().getUserSharingScope();
-                        System.out.println("Found prior sharing scope in a health data record: " + found);
                         return found;
                     }
                 }
             }
         }
-        System.out.println("Exhausted search for sharing scope");
         return null;
     }
 }
