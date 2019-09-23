@@ -27,7 +27,6 @@ import com.amazonaws.services.dynamodbv2.model.GetItemResult;
 import com.amazonaws.services.dynamodbv2.model.ReturnValue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
 
 import org.joda.time.DateTime;
@@ -45,25 +44,25 @@ import org.sagebionetworks.bridge.rest.model.UploadList;
 public class App {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String TABLE_NAME = "prod-heroku-HealthDataRecord3";
-    
-    private List<UserInfo> users;
-    private SignIn signIn;
     // 2019-08-29T14:45:05-07:00 is the timestamp of the broken deployment
-    private DateTime eventStart = new DateTime(1567115105000L);
+    public final DateTime EVENT_START = new DateTime(1567115105000L);
+    
+    AppHelper helper;
+    List<UserInfo> users;
+    SignIn signIn;
     // 2019-09-19T23:24:02.000Z is the timestamp of the deployment of a fix (in query for users below)
-    private BasicAWSCredentials awsCredentials;
+    BasicAWSCredentials awsCredentials;
 
     public static void main(String[] args) throws Exception {
+        JsonNode config = MAPPER.readTree(new File("/Users/adark/sharing-fix.json"));
+        
         // These users are the people retrieved with this query:
-        // SELECT studyId, id, createdOn 
-        // FROM Accounts a
-        // WHERE sharingScope = 'NO_SHARING' 
-        // AND status = 'ENABLED' 
-        // AND modifiedOn > 1567115105000 
-        // AND modifiedOn < 1568935442000
+        // SELECT studyId, id, createdOn FROM Accounts a
+        // WHERE sharingScope = 'NO_SHARING' AND status = 'ENABLED' 
+        // AND modifiedOn > 1567115105000  AND modifiedOn < 1568935442000
         // AND (SELECT count(*) FROM AccountDataGroups ag WHERE ag.accountId = a.id AND ag.dataGroup = 'test_user') = 0
         // LIMIT 2350;
-        JsonNode users = MAPPER.readTree(new File("/Users/adark/temp/impacted-users.json"));
+        JsonNode users = MAPPER.readTree(new File(config.get("file").textValue()));
         List<UserInfo> list = new ArrayList<>();
         for (int i = 0; i < users.size(); i++) {
             JsonNode user = users.get(i);
@@ -72,7 +71,7 @@ public class App {
             DateTime createdOn = new DateTime(user.get("createdOn").longValue()).withZone(UTC);
             list.add(new UserInfo(studyId, id, createdOn));
         }
-        JsonNode config = MAPPER.readTree(new File("/Users/adark/sharing-fix.json"));
+        
         SignIn signIn = new SignIn()
                 .study("api")
                 .email(config.get("admin").get("email").textValue())
@@ -88,24 +87,32 @@ public class App {
         this.users = users;
         this.signIn = signIn;
         this.awsCredentials = awsCredentials;
+        
+        ClientManager manager = createClientManager();
+        this.helper = new AppHelper(
+                manager.getClient(ForAdminsApi.class), 
+                manager.getClient(ParticipantsApi.class));
     }
     
     public void run() throws Exception {
         AmazonDynamoDBClient client = getDynamoClient();
         Table table = new DynamoDB(client).getTable(TABLE_NAME);
-        ClientManager manager = createClientManager();
-        ForAdminsApi adminsApi = manager.getClient(ForAdminsApi.class);
 
-        adminsApi.adminSignIn(signIn).execute().body();
+        helper.adminSignIn(signIn.getStudy());
         
         String currentStudyId = "api";
         for (UserInfo userInfo : users) {
-            currentStudyId = changeStudyIfNecessary(adminsApi, userInfo, currentStudyId);
-            ParticipantsApi usersApi = manager.getClient(ParticipantsApi.class);
-            StudyParticipant participant = usersApi.getParticipantById(userInfo.getId(), true).execute().body();
+            currentStudyId = changeStudyIfNecessary(userInfo, currentStudyId);
+            //ParticipantsApi usersApi = manager.getClient(ParticipantsApi.class);
+            StudyParticipant participant = helper.getParticipantById(userInfo.getId());
 
             // If the user isn't enabled or isn't consented, don't turn on their sharing status
             if (participant.getStatus() != ENABLED || !TRUE.equals(participant.isConsented())) {
+                continue;
+            }
+            // If user was created *after* bug was introduced, there's no point in looking in history 
+            // for a better choice of sharing scope
+            if (participant.getCreatedOn().isAfter(EVENT_START)) {
                 continue;
             }
             // The sharing scope we'll use if we can't determine a more accurate value from historical records.
@@ -113,34 +120,31 @@ public class App {
                     ALL_QUALIFIED_RESEARCHERS :
                     SPONSORS_AND_PARTNERS;
             
-            // If user was created *after* bug was introduced, there's no point in looking in history for a better
-            // choice of sharing scope
-            if (participant.getCreatedOn().isBefore(eventStart)) {
-                // Query health data records for a previous value
-                SharingScope foundScope = findPriorSharingScope(adminsApi, usersApi, userInfo.getId(), participant.getCreatedOn());
-                if (foundScope != null) {
-                    scope = foundScope;
-                }
+            // Query health data records for a previous value
+            SharingScope foundScope = findPriorSharingScope(userInfo.getId(), participant.getCreatedOn());
+            if (foundScope != null) {
+                scope = foundScope;
             }
             if (scope != SharingScope.NO_SHARING) {
                 participant.setSharingScope(scope);
-                System.out.println("UPDATE USER: " + userInfo.getId() + " to sharing " + scope);
-                usersApi.updateParticipant(userInfo.getId(), participant).execute().body();
+                // usersApi.updateParticipant(userInfo.getId(), participant).execute().body();
+                System.out.println("UPDATED USER: " + userInfo.getId() + " to sharing " + scope);
                 
-                List<String> recordIds = recordsToChange(usersApi, userInfo.getId());
-                System.out.println("UPDATE HEALTH RECORDS: " + Joiner.on(", ").join(recordIds));
+                List<String> recordIds = healthDataRecordsToChange(userInfo.getId());
                 for (String recordId : recordIds) {
                     GetItemRequest request = new GetItemRequest();
                     request.setTableName(TABLE_NAME);
                     request.setKey(ImmutableMap.of("id", new AttributeValue().withS(recordId)));
                     GetItemResult result = client.getItem(request);
-                    
+
                     if (result.getItem().get("userSharingScope").getS().equals("NO_SHARING")) {
-                        UpdateItemSpec updateItemSpec = new UpdateItemSpec().withPrimaryKey("id", recordId)
+                        UpdateItemSpec updateItemSpec = new UpdateItemSpec()
+                                .withPrimaryKey("id", recordId)
                                 .withUpdateExpression("set userSharingScope = :r")
                                 .withValueMap(new ValueMap().withString(":r", scope.name()))
-                                .withReturnValues(ReturnValue.UPDATED_NEW);
-                        table.updateItem(updateItemSpec);
+                                .withReturnValues(ReturnValue.NONE);
+                        // table.updateItem(updateItemSpec);
+                        System.out.println("UPDATED HEALTH RECORD: " + recordId);
                     }
                 }
             }
@@ -160,21 +164,21 @@ public class App {
         return new ClientManager.Builder().withSignIn(signIn).withConfig(bridgeConfig).build();
     }
     
-    String changeStudyIfNecessary(ForAdminsApi adminsApi, UserInfo userInfo, String currentStudyId) throws Exception {
+    String changeStudyIfNecessary(UserInfo userInfo, String currentStudyId) throws Exception {
         if (currentStudyId.equals(userInfo.getStudyId())) {
             return currentStudyId;
         }
-        adminsApi.adminChangeStudy(new SignIn().study(userInfo.getStudyId())).execute().body();
+        helper.adminChangeStudy(userInfo.getStudyId());
         return userInfo.getStudyId();
     }
     
-    List<String> recordsToChange(ParticipantsApi usersApi, String userId) throws Exception {
-        DateTime start = new DateTime(eventStart);
-        DateTime end = DateTime.now();
+    List<String> healthDataRecordsToChange(String userId) throws Exception {
+        DateTime start = new DateTime(EVENT_START);
+        DateTime end = DateTime.now().plusHours(1);
         List<String> healthRecordIds = new ArrayList<>();
         String offsetKey = null;
         do {
-            UploadList list = usersApi.getParticipantUploads(userId, start, end, 50, offsetKey).execute().body();
+            UploadList list = helper.getParticipantUploads(userId, start, end, offsetKey);
             for (Upload upload : list.getItems()) {
                 if (upload.getRecordId() != null) {
                     healthRecordIds.add(upload.getRecordId());
@@ -186,25 +190,24 @@ public class App {
         return healthRecordIds;
     }
     
-    
-    SharingScope findPriorSharingScope(ForAdminsApi adminsApi, ParticipantsApi usersApi, String userId, DateTime createdOn) throws Exception {
+    SharingScope findPriorSharingScope(String userId, DateTime createdOn) throws Exception {
         // We have to be super aggressive about this. The user was created before the sharing error, we need to figure
         // out what their sharing setting was...
         int daysStart = 0;
         int daysEnd = 0;
-        while(eventStart.minusDays(daysStart).isAfter(createdOn)) {
+        while(EVENT_START.minusDays(daysStart).isAfter(createdOn)) {
             daysEnd = daysStart;
             daysStart += 45;
-            if (eventStart.minusDays(daysStart).isBefore(createdOn)) {
+            if (EVENT_START.minusDays(daysStart).isBefore(createdOn)) {
                 return null;
             }
             String offsetKey = null;
             List<Upload> allUploadsInDateRange = new ArrayList<>();
             do {
-                DateTime startTime = eventStart.minusDays(daysStart).withZone(UTC);
-                DateTime endTime = eventStart.minusDays(daysEnd).withZone(UTC);
+                DateTime startTime = EVENT_START.minusDays(daysStart).withZone(UTC);
+                DateTime endTime = EVENT_START.minusDays(daysEnd).withZone(UTC);
                 
-                UploadList list = usersApi.getParticipantUploads(userId, startTime, endTime, 50, offsetKey).execute().body();
+                UploadList list = helper.getParticipantUploads(userId, startTime, endTime, offsetKey);
                 allUploadsInDateRange.addAll(list.getItems());
                 offsetKey = list.getNextPageOffsetKey();
             } while(offsetKey != null);
@@ -215,7 +218,7 @@ public class App {
                 .collect(Collectors.toList());
             for (Upload upload : sorted) {
                 if (upload.getRecordId() != null) {
-                    Upload fullUpload = adminsApi.getUploadByRecordId(upload.getRecordId()).execute().body();
+                    Upload fullUpload = helper.getUploadByRecordId(upload.getRecordId());
                     if (fullUpload.getHealthData().getUserSharingScope() != null) {
                         SharingScope found = fullUpload.getHealthData().getUserSharingScope();
                         return found;
