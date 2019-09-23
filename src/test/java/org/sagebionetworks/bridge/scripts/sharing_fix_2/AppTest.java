@@ -1,16 +1,11 @@
 package org.sagebionetworks.bridge.scripts.sharing_fix_2;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.sagebionetworks.bridge.rest.model.Environment.PRODUCTION;
 
 import java.util.ArrayList;
 import java.util.List;
 
-import com.amazonaws.ClientConfiguration;
-import com.amazonaws.PredefinedClientConfigurations;
 import com.amazonaws.auth.BasicAWSCredentials;
-import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient;
 import com.google.common.collect.ImmutableList;
 
 import org.joda.time.DateTime;
@@ -22,10 +17,6 @@ import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
 
-import org.sagebionetworks.bridge.rest.ClientManager;
-import org.sagebionetworks.bridge.rest.Config;
-import org.sagebionetworks.bridge.rest.api.ForAdminsApi;
-import org.sagebionetworks.bridge.rest.api.ParticipantsApi;
 import org.sagebionetworks.bridge.rest.model.SignIn;
 import org.sagebionetworks.bridge.rest.model.Upload;
 import org.sagebionetworks.bridge.rest.model.UploadList;
@@ -39,13 +30,7 @@ public class AppTest extends Mockito {
     BasicAWSCredentials mockCredentials;
     
     @Mock
-    ClientManager mockManager;
-    
-    @Mock
-    ParticipantsApi mockUsersApi;
-    
-    @Mock
-    ForAdminsApi mockAdminApi;
+    AppHelper mockHelper;
     
     @Mock
     UploadList mockUploadList1;
@@ -57,9 +42,13 @@ public class AppTest extends Mockito {
     
     SignIn signIn;
     
+    App app;
+    
     @Before
     public void before( ) {
         DateTimeUtils.setCurrentMillisFixed(NOW.getMillis());
+        
+        MockitoAnnotations.initMocks(this);
         
         users = new ArrayList<>();
         users.add(new UserInfo("study1", "user1", CREATED_ON));
@@ -68,7 +57,7 @@ public class AppTest extends Mockito {
         
         signIn = new SignIn().email("email@email.com").password("password").study("api");
         
-        MockitoAnnotations.initMocks(this);
+        app = spy(new App(users, signIn, mockCredentials, mockHelper));
     }
     
     @After
@@ -77,29 +66,7 @@ public class AppTest extends Mockito {
     }
     
     @Test
-    public void test() {
-        App app = spy(new App(users, signIn, mockCredentials));
-        when(app.createClientManager()).thenReturn(mockManager);
-    }
-    
-    @Test
-    public void getDynamoClient() {
-        App app = new App(users, signIn, mockCredentials);
-        AmazonDynamoDBClient client = app.getDynamoClient();
-        assertNotNull(client);
-    }
-    
-    @Test
-    public void createClientManager() {
-        App app = new App(users, signIn, mockCredentials);
-        ClientManager manager = app.createClientManager();
-        assertNotNull(manager);
-    }
-    
-    @Test
     public void healthDataRecordsToChange() throws Exception { 
-        App app = spy(new App(users, signIn, mockCredentials));
-        
         DateTime start = new DateTime(app.EVENT_START);
         assertEquals(start, app.EVENT_START);
         DateTime end = NOW.plusHours(1);
@@ -112,19 +79,16 @@ public class AppTest extends Mockito {
         // upload3 does not have a recordId and will not be added to list.
         Upload upload4 = new Upload();
         Tests.setVariableValueInObject(upload4, "recordId", "id4");
+        
         when(mockUploadList1.getItems()).thenReturn(ImmutableList.of(upload1, upload2, upload3));
         when(mockUploadList1.getNextPageOffsetKey()).thenReturn("anOffset");
-        
         when(mockUploadList2.getItems()).thenReturn(ImmutableList.of(upload4));
-        /*
-        doReturn(mockUploadList1).when(app).getParticipantUploads(USER_ID, start, end, null);
-        doReturn(mockUploadList2).when(app).getParticipantUploads(USER_ID, start, end, "anOffset");
+        
+        when(mockHelper.getParticipantUploads(USER_ID, start, end, null)).thenReturn(mockUploadList1);
+        when(mockHelper.getParticipantUploads(USER_ID, start, end, "anOffset")).thenReturn(mockUploadList2);
         
         List<String> recordIds = app.healthDataRecordsToChange(USER_ID);
         assertEquals(recordIds, ImmutableList.of("id1", "id2", "id4"));
-        
-        verify(app).getParticipantUploads(mockUsersApi, USER_ID, start, end, null);
-        */
     }
     
 }

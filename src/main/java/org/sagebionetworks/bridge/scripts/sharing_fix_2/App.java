@@ -80,18 +80,26 @@ public class App {
         BasicAWSCredentials awsCredentials = new BasicAWSCredentials(
                 config.get("aws").get("key").textValue(),
                 config.get("aws").get("secret").textValue());
-        new App(list, signIn, awsCredentials).run();
+        
+        ClientManager manager = createClientManager(signIn);
+        AppHelper helper = new AppHelper(
+                manager.getClient(ForAdminsApi.class), 
+                manager.getClient(ParticipantsApi.class));
+        
+        new App(list, signIn, awsCredentials, helper).run();
+    }
+    
+    static ClientManager createClientManager(SignIn signIn) {
+        Config bridgeConfig = new Config();
+        bridgeConfig.set(PRODUCTION);
+        return new ClientManager.Builder().withSignIn(signIn).withConfig(bridgeConfig).build();
     }
 
-    public App(List<UserInfo> users, SignIn signIn, BasicAWSCredentials awsCredentials) {
+    public App(List<UserInfo> users, SignIn signIn, BasicAWSCredentials awsCredentials, AppHelper helper) {
         this.users = users;
         this.signIn = signIn;
         this.awsCredentials = awsCredentials;
-        
-        ClientManager manager = createClientManager();
-        this.helper = new AppHelper(
-                manager.getClient(ForAdminsApi.class), 
-                manager.getClient(ParticipantsApi.class));
+        this.helper = helper;
     }
     
     public void run() throws Exception {
@@ -156,12 +164,6 @@ public class App {
     AmazonDynamoDBClient getDynamoClient() {
         ClientConfiguration awsClientConfig = PredefinedClientConfigurations.dynamoDefault().withMaxErrorRetry(1);
         return new AmazonDynamoDBClient(awsCredentials, awsClientConfig);
-    }
-    
-    ClientManager createClientManager() {
-        Config bridgeConfig = new Config();
-        bridgeConfig.set(PRODUCTION);
-        return new ClientManager.Builder().withSignIn(signIn).withConfig(bridgeConfig).build();
     }
     
     String changeStudyIfNecessary(UserInfo userInfo, String currentStudyId) throws Exception {
