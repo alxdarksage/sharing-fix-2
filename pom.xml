@@ -110,5 +110,5 @@
         	<name>org-sagebridge-repo-maven-releases</name>
         	<url>http://repo-maven.sagebridge.org/</url>
     	</repository>
-	</repositories>    
+	</repositories>
 </project>

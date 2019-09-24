@@ -218,6 +218,25 @@ public class SharingScopeFixerTest extends Mockito {
     }
 
     @Test
+    public void runFindsNoCompletedUploads() throws Exception {
+        StudyParticipant participant = new StudyParticipant().status(ENABLED).consented(true);
+        setVariableValueInObject(participant, "createdOn", createdOn.minusDays(100));
+        when(mockHelper.getParticipantById(any())).thenReturn(participant);
+        
+        UploadList list = mockList(null,
+            createUpload("id1", now.minusDays(3), null), 
+            createUpload(null, now.minusDays(2), null));
+        when(mockHelper.getParticipantUploads(any(), any(), any(), any())).thenReturn(list);
+
+        fixer.run();
+        
+        verify(mockHelper).updateParticipant(participantCaptor.capture());
+        assertEquals(SPONSORS_AND_PARTNERS, participantCaptor.getValue().getSharingScope());
+        
+        verify(mockHelper).changeHealthRecordSharingScope("id1", SPONSORS_AND_PARTNERS);
+    }
+    
+    @Test
     public void getHealthRecordsToChange() throws Exception { 
         DateTime start = new DateTime(fixer.EVENT_START);
         assertEquals(start, fixer.EVENT_START);
@@ -236,6 +255,24 @@ public class SharingScopeFixerTest extends Mockito {
         
         List<String> recordIds = fixer.getHealthRecordsToChange(USER_ID_1);
         assertEquals(ImmutableList.of("id1", "id2", "id4"), recordIds);
+    }
+    
+    @Test
+    public void getHealthRecordsToChangeSkipsIncomplete() throws Exception { 
+        DateTime start = new DateTime(fixer.EVENT_START);
+        assertEquals(start, fixer.EVENT_START);
+        DateTime end = now.plusHours(1);
+        
+        // I don't think you'll have a record ID without a health data record,
+        // but we test for this condition
+        UploadList list = mockList(null, 
+                createUpload("id1", createdOn, ALL_QUALIFIED_RESEARCHERS),
+                createIncompleteUpload(),
+                createIncompleteUpload());
+        when(mockHelper.getParticipantUploads(USER_ID_1, start, end, null)).thenReturn(list);
+        
+        List<String> recordIds = fixer.getHealthRecordsToChange(USER_ID_1);
+        assertEquals(ImmutableList.of("id1"), recordIds);
     }
     
     @Test
@@ -306,6 +343,40 @@ public class SharingScopeFixerTest extends Mockito {
         verify(mockHelper, times(2)).getUploadByRecordId(any());
     }
     
+    @Test
+    public void findPriorSharingScopeSkipsIncompleteUploads() throws Exception {
+        DateTime start = new DateTime(fixer.EVENT_START).minusDays(45).withZone(DateTimeZone.UTC);
+        DateTime end = new DateTime(fixer.EVENT_START).withZone(DateTimeZone.UTC);
+        
+        // It might be that we don't need  
+        UploadList list = mockList(null,
+            createIncompleteUpload(),
+            createUpload("id1", now.minusDays(3), SPONSORS_AND_PARTNERS), 
+            createUpload("id2", now.minusDays(2), SPONSORS_AND_PARTNERS),
+            createIncompleteUpload());
+        when(mockHelper.getParticipantUploads(USER_ID_1, start, end, null)).thenReturn(list);
+        
+        SharingScope found = fixer.findPriorSharingScope(USER_ID_1, createdOn.minusDays(100));
+        assertEquals(SPONSORS_AND_PARTNERS, found);
+    }
+    
+    @Test
+    public void findPriorSharingScopeHandlesCompletedRecordsWithoutSharingScope() throws Exception {
+        DateTime start = new DateTime(fixer.EVENT_START).minusDays(45).withZone(DateTimeZone.UTC);
+        DateTime end = new DateTime(fixer.EVENT_START).withZone(DateTimeZone.UTC);
+        
+        // It might be that we don't need  
+        UploadList list = mockList(null,
+            createUploadWithoutSharing("id1", now.minusDays(4)),
+            createUpload("id2", now.minusDays(3), SPONSORS_AND_PARTNERS), 
+            createUpload("id3", now.minusDays(2), SPONSORS_AND_PARTNERS),
+            createUploadWithoutSharing("id4", now.minusDays(1)));
+        when(mockHelper.getParticipantUploads(USER_ID_1, start, end, null)).thenReturn(list);
+        
+        SharingScope found = fixer.findPriorSharingScope(USER_ID_1, createdOn.minusDays(100));
+        assertEquals(SPONSORS_AND_PARTNERS, found);
+    }
+    
     private Upload createUpload(String recordId, DateTime completedOn, SharingScope sharingScope) throws IOException {
         Upload upload = mock(Upload.class);
         if (recordId != null) {
@@ -318,9 +389,25 @@ public class SharingScopeFixerTest extends Mockito {
             when(record.getUserSharingScope()).thenReturn(sharingScope);
             when(upload.getHealthData()).thenReturn(record);
         }
-        
         return upload;
     }
+    
+    private Upload createIncompleteUpload() throws IOException {
+        return mock(Upload.class);
+    }
+    
+    private Upload createUploadWithoutSharing(String recordId, DateTime completedOn) throws IOException {
+        Upload upload = mock(Upload.class);
+        if (recordId != null) {
+            when(upload.getRecordId()).thenReturn(recordId);
+            when(mockHelper.getUploadByRecordId(recordId)).thenReturn(upload);
+        }
+        when(upload.getCompletedOn()).thenReturn(completedOn);
+        HealthDataRecord record = mock(HealthDataRecord.class);
+        when(upload.getHealthData()).thenReturn(record);
+        return upload;
+    }
+    
     
     private UploadList mockList(String offsetKey, Upload... uploads) {
         UploadList mock = mock(UploadList.class);

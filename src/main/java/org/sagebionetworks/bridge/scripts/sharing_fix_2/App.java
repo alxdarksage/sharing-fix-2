@@ -18,6 +18,7 @@ import org.joda.time.DateTime;
 
 import org.sagebionetworks.bridge.rest.ClientManager;
 import org.sagebionetworks.bridge.rest.Config;
+import org.sagebionetworks.bridge.rest.Config.Props;
 import org.sagebionetworks.bridge.rest.api.ForAdminsApi;
 import org.sagebionetworks.bridge.rest.api.ParticipantsApi;
 import org.sagebionetworks.bridge.rest.model.SignIn;
@@ -67,6 +68,7 @@ public class App {
     static ClientManager createClientManager(SignIn signIn) {
         Config bridgeConfig = new Config();
         bridgeConfig.set(PRODUCTION);
+        bridgeConfig.set(Props.LANGUAGES, "en");
         return new ClientManager.Builder().withSignIn(signIn).withConfig(bridgeConfig).build();
     }
     

@@ -45,7 +45,7 @@ public class SharingScopeFixer {
     }
     
     public void run() throws Exception {
-        helper.adminSignIn(signIn.getStudy());
+        helper.adminSignIn(signIn);
         
         String currentStudyId = "api";
         for (UserInfo userInfo : users) {

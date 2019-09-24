@@ -36,8 +36,8 @@ public class AppHelper {
         this.table = new DynamoDB(client).getTable(TABLE_NAME);
     }
     
-    public void adminSignIn(String studyId) throws IOException {
-        adminsApi.adminSignIn(new SignIn().study(studyId)).execute().body();
+    public void adminSignIn(SignIn signIn) throws IOException {
+        adminsApi.adminSignIn(signIn).execute().body();
     }
     
     public void adminChangeStudy(String studyId) throws IOException {
