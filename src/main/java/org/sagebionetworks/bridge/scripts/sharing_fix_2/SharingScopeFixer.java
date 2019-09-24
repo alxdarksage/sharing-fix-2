@@ -25,14 +25,10 @@ public class SharingScopeFixer {
     private static final Logger LOG = LoggerFactory.getLogger(SharingScopeFixer.class);
     
     /** 
-     * 2019-08-29T14:45:05-07:00 is the timestamp of the broken deployment.
-     * 
-     * TODO: What about clock skew on the prod machines? Should we shift this back by 
-     * 10 minutes or an hour? If we find uploads with sharing set, we'll just leave 
-     * those alone, so this should be pretty safe, unless we miss that one upload
-     * right before the deployment that would have told us the prior sharing state.
+     * 2019-08-29T14:45:05-07:00 is the timestamp of the broken deployment. Go back one
+     * hour just to make sure clock skew is not an issue.
      */
-    public final DateTime EVENT_START = new DateTime(1567115105000L);
+    public final DateTime EVENT_START = DateTime.parse("2019-08-29T13:45:05-07:00");
     
     AppHelper helper;
     List<UserInfo> users;
@@ -48,7 +44,9 @@ public class SharingScopeFixer {
         helper.adminSignIn(signIn);
         
         String currentStudyId = "api";
-        for (UserInfo userInfo : users) {
+        int len = users.size();
+        for (int i=0; i < users.size(); i++) {
+            UserInfo userInfo = users.get(i);
             currentStudyId = changeStudyIfNecessary(userInfo, currentStudyId);
             
             StudyParticipant participant = helper.getParticipantById(userInfo.getId());
@@ -76,15 +74,14 @@ public class SharingScopeFixer {
             if (scope != NO_SHARING) {
                 participant.setSharingScope(scope);
                 helper.updateParticipant(participant);
-                LOG.info("UPDATED USER: " + userInfo.getId() + " to sharing " + scope);
+                LOG.info((i + 1) + " OF " + len + " USER UPDATED: " + userInfo.getId() + " to " + scope
+                        + " in study " + userInfo.getStudyId());
                 
                 List<String> recordIds = getHealthRecordsToChange(userInfo.getId());
                 for (String recordId : recordIds) {
                     helper.changeHealthRecordSharingScope(recordId, scope);
-                    // TODO: Is this what we need to redrive the export? Log whatever we will need for that.
-                    // Can we log the JSON we will need to submit to the exporter? Let's do that and save
-                    // some trouble
-                    LOG.info("UPDATED HEALTH RECORD: " + recordId);
+                    LOG.info("HEALTH RECORD UPDATED: " + recordId);
+                    Thread.sleep(200);
                 }
             }
             Thread.sleep(1000);
@@ -100,9 +97,8 @@ public class SharingScopeFixer {
     }
     
     List<String> getHealthRecordsToChange(String userId) throws Exception {
-        // TODO: clock skew, should we check before running?
         DateTime start = new DateTime(EVENT_START); 
-        DateTime end = DateTime.now().plusHours(1); // don't want clock skew to miss any
+        DateTime end = DateTime.now().plusHours(1); // again, clock skew
         List<String> healthRecordIds = new ArrayList<>();
         String offsetKey = null;
         do {
