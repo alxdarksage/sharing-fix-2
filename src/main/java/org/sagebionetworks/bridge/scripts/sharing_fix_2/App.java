@@ -11,6 +11,8 @@ import com.amazonaws.ClientConfiguration;
 import com.amazonaws.PredefinedClientConfigurations;
 import com.amazonaws.auth.BasicAWSCredentials;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient;
+import com.amazonaws.services.dynamodbv2.document.DynamoDB;
+import com.amazonaws.services.dynamodbv2.document.Table;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -24,6 +26,7 @@ import org.sagebionetworks.bridge.rest.api.ParticipantsApi;
 import org.sagebionetworks.bridge.rest.model.SignIn;
 
 public class App {
+    private static final String TABLE_NAME = "prod-heroku-HealthDataRecord3";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     
     AppHelper helper;
@@ -59,7 +62,9 @@ public class App {
                 .password(config.get("admin").get("password").textValue());
         ClientManager manager = createClientManager(signIn);
         
-        AppHelper helper = new AppHelper(client, manager.getClient(ForAdminsApi.class),
+        Table table = new DynamoDB(client).getTable(TABLE_NAME);
+        
+        AppHelper helper = new AppHelper(table, manager.getClient(ForAdminsApi.class),
                 manager.getClient(ParticipantsApi.class));
         
         new SharingScopeFixer(list, signIn, helper).run();
