@@ -54,16 +54,16 @@ public class AppHelper {
     }
     
     public void updateParticipant(StudyParticipant participant) throws IOException {
-        // usersApi.updateParticipant(participant.getId(), participant).execute().body(); 
+        usersApi.updateParticipant(participant.getId(), participant).execute().body(); 
     }
     
     public void changeHealthRecordSharingScope(String recordId, SharingScope scope) {
         UpdateItemSpec updateItemSpec = new UpdateItemSpec()
                 .withPrimaryKey("id", recordId)
                 .withUpdateExpression("set userSharingScope = :r")
-                .withConditionExpression("userSharingScope <> :s") // or is it != ?
+                .withConditionExpression("userSharingScope = :s") // or is it != ?
                 .withValueMap(new ValueMap().withString(":r", scope.name()).withString(":s", NO_SHARING.name()))
                 .withReturnValues(ReturnValue.NONE);
-        // table.updateItem(updateItemSpec);
+        table.updateItem(updateItemSpec);
     }
 }
