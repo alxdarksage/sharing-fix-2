@@ -338,9 +338,10 @@ public class SharingScopeFixerTest extends Mockito {
         SharingScope found = fixer.findPriorSharingScope(USER_ID_1, createdOn.minusDays(100));
         assertNull(found);
         
-        verify(mockHelper).getParticipantUploads(any(), any(), any(), any());
-        // Only two have record IDs so that's all we look at
-        verify(mockHelper, times(2)).getUploadByRecordId(any());
+        verify(mockHelper, times(2)).getParticipantUploads(any(), any(), any(), any());
+        
+        // Two times for each page (because we return the same list each call to getParticipantUploads
+        verify(mockHelper, times(4)).getUploadByRecordId(any());
     }
     
     @Test
