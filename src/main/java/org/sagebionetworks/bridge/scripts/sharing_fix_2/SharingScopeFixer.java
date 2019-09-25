@@ -46,45 +46,49 @@ public class SharingScopeFixer {
         String currentStudyId = "api";
         int len = users.size();
         for (int i=0; i < users.size(); i++) {
-            UserInfo userInfo = users.get(i);
-            currentStudyId = changeStudyIfNecessary(userInfo, currentStudyId);
-            
-            StudyParticipant participant = helper.getParticipantById(userInfo.getId());
-            // If the user isn't enabled or isn't consented, don't turn on their sharing status
-            if (participant.getStatus() != ENABLED || !TRUE.equals(participant.isConsented())) {
-                continue;
-            }
-            // The sharing scope we'll use if we can't determine a more accurate value from historical 
-            // records. Samsung was known to set the widest sharing with no choice. 
-            SharingScope scope = ("samsung-blood-pressure".equals(userInfo.getStudyId())) ?
-                    ALL_QUALIFIED_RESEARCHERS :
-                    SPONSORS_AND_PARTNERS;
-            
-            // If user was created *after* bug was introduced, there's no point in looking in history 
-            // for a better choice of sharing scope
-            if (!participant.getCreatedOn().isAfter(EVENT_START)) {
-                // Query health data records in reverse chronological order until you find the last 
-                // sharing scope that was submitted by the user, if any
-                SharingScope foundScope = findPriorSharingScope(userInfo.getId(), participant.getCreatedOn());
-                if (foundScope != null) {
-                    scope = foundScope;
-                }
-            }
-            // Don't update if the user intended to turn off sharing prior to the defect introduction
-            if (scope != NO_SHARING) {
-                participant.setSharingScope(scope);
-                helper.updateParticipant(participant);
-                LOG.info((i + 1) + " OF " + len + " USER UPDATED: " + userInfo.getId() + " to " + scope
-                        + " in study " + userInfo.getStudyId());
-                
-                List<String> recordIds = getHealthRecordsToChange(userInfo.getId());
-                for (String recordId : recordIds) {
-                    helper.changeHealthRecordSharingScope(recordId, scope);
-                    LOG.info("HEALTH RECORD UPDATED: " + recordId);
-                    Thread.sleep(200);
-                }
-            }
             Thread.sleep(1000);
+            UserInfo userInfo = users.get(i);
+            try {
+                currentStudyId = changeStudyIfNecessary(userInfo, currentStudyId);
+                
+                StudyParticipant participant = helper.getParticipantById(userInfo.getId());
+                // If the user isn't enabled or isn't consented, don't turn on their sharing status
+                if (participant.getStatus() != ENABLED || !TRUE.equals(participant.isConsented())) {
+                    continue;
+                }
+                // The sharing scope we'll use if we can't determine a more accurate value from historical 
+                // records. Samsung was known to set the widest sharing with no choice. 
+                SharingScope scope = ("samsung-blood-pressure".equals(userInfo.getStudyId())) ?
+                        ALL_QUALIFIED_RESEARCHERS :
+                        SPONSORS_AND_PARTNERS;
+                
+                // If user was created *after* bug was introduced, there's no point in looking in history 
+                // for a better choice of sharing scope
+                if (!participant.getCreatedOn().isAfter(EVENT_START)) {
+                    // Query health data records in reverse chronological order until you find the last 
+                    // sharing scope that was submitted by the user, if any
+                    SharingScope foundScope = findPriorSharingScope(userInfo.getId(), participant.getCreatedOn());
+                    if (foundScope != null) {
+                        scope = foundScope;
+                    }
+                }
+                // Don't update if the user intended to turn off sharing prior to the defect introduction
+                if (scope != NO_SHARING) {
+                    participant.setSharingScope(scope);
+                    helper.updateParticipant(participant);
+                    LOG.info("UPDATED " + (i + 1) + " of " + len + ": " + userInfo.getId() + " TO " + scope
+                            + " IN STUDY " + userInfo.getStudyId());
+                    
+                    List<String> recordIds = getHealthRecordsToChange(userInfo.getId());
+                    for (String recordId : recordIds) {
+                        helper.changeHealthRecordSharingScope(recordId, scope);
+                        LOG.info(recordId);
+                        Thread.sleep(200);
+                    }
+                }
+            } catch(Throwable throwable) {
+                LOG.error("Error processing user #" + (i+1) + " (" + userInfo.getId() + ")", throwable);
+            }
         }
     }
     
@@ -123,16 +127,16 @@ public class SharingScopeFixer {
         while(EVENT_START.minusDays(daysStart).isAfter(createdOn)) {
             daysEnd = daysStart;
             daysStart += 45;
-            // should this be days end? Work it out on paper.
-            if (EVENT_START.minusDays(daysStart).isBefore(createdOn)) {
+            DateTime startTime = EVENT_START.minusDays(daysStart).withZone(UTC);
+            DateTime endTime = EVENT_START.minusDays(daysEnd).withZone(UTC);
+            
+            // The time range is entirely outside of the time the user existed
+            if (endTime.isBefore(createdOn)) {
                 return null;
             }
             String offsetKey = null;
             List<Upload> allUploadsInDateRange = new ArrayList<>();
             do {
-                DateTime startTime = EVENT_START.minusDays(daysStart).withZone(UTC);
-                DateTime endTime = EVENT_START.minusDays(daysEnd).withZone(UTC);
-                
                 UploadList list = helper.getParticipantUploads(userId, startTime, endTime, offsetKey);
                 for (Upload upload : list.getItems()) {
                     // when completedOn != null, the full record will have a healthData record
